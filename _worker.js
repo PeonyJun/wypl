@@ -1,79 +1,94 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-
-    // 【1】定义全局跨域放行规则 (CORS)
-    // 允许任何第三方域名或本地网页调用此 API
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, PUT, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Admin-Key",
     };
 
-    // 【2】处理浏览器的 OPTIONS 预检请求
-    // 跨域发送 POST/DELETE 前，浏览器会先发一次 OPTIONS 探路，必须拦截并放行
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // --- 以下是 API 核心业务逻辑 ---
+    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+
     if (url.pathname.startsWith("/api/comments")) {
-      
-      // 【3】接口：获取评论列表
       if (request.method === "GET") {
         try {
-          // 按 ID 倒序读取数据（最新评论在前）
-          const { results } = await env.DB.prepare("SELECT * FROM comments ORDER BY id DESC").all();
-          return Response.json(results, { headers: corsHeaders });
+          const { results: comments } = await env.DB.prepare("SELECT id, parent_id, name, qq, content, is_pinned, created_at FROM comments ORDER BY is_pinned DESC, id DESC").all();
+          const { results: config } = await env.DB.prepare("SELECT value FROM config WHERE key = 'dev_qqs'").all();
+          const devQQs = config[0]?.value ? config[0].value.split(',') : [];
+          return Response.json({ comments, devQQs }, { headers: corsHeaders });
         } catch (e) {
-          return new Response("读取数据库失败: " + e.message, { status: 500, headers: corsHeaders });
+          return new Response(e.message, { status: 500, headers: corsHeaders });
         }
       }
 
-      // 【4】接口：提交新评论
       if (request.method === "POST") {
         try {
-          const { name, qq, content } = await request.json();
-          // 后端二次校验防脏数据
-          if (!name || !content) {
-            return new Response("昵称或内容不能为空", { status: 400, headers: corsHeaders });
+          const { results: banConf } = await env.DB.prepare("SELECT value FROM config WHERE key = 'banned_ips'").all();
+          const bannedIps = banConf[0]?.value || "";
+          if (bannedIps.includes(clientIp)) {
+            return new Response("Banned", { status: 403, headers: corsHeaders });
           }
-          // 写入 D1 数据库
-          await env.DB.prepare("INSERT INTO comments (name, qq, content) VALUES (?, ?, ?)")
-            .bind(name, qq || '', content)
+
+          const { name, qq, content, parent_id } = await request.json();
+          if (!name || !content) {
+            return new Response("Invalid", { status: 400, headers: corsHeaders });
+          }
+
+          const pid = parent_id ? parseInt(parent_id) : null;
+          await env.DB.prepare("INSERT INTO comments (name, qq, content, ip, parent_id) VALUES (?, ?, ?, ?, ?)")
+            .bind(name, qq || '', content, clientIp, pid)
             .run();
           return Response.json({ success: true }, { headers: corsHeaders });
         } catch (e) {
-          return new Response("写入数据库失败: " + e.message, { status: 500, headers: corsHeaders });
-        }
-      }
-
-      // 【5】接口：管理员删除评论
-      if (request.method === "DELETE") {
-        const adminKey = request.headers.get("Admin-Key");
-        // 校验 Header 中携带的管理员密码
-        if (adminKey !== "5280") {
-          return new Response("管理员密码错误", { status: 401, headers: corsHeaders });
-        }
-        
-        // 从 URL 末尾提取需要删除的评论 ID
-        const id = url.pathname.split("/").pop();
-        try {
-          await env.DB.prepare("DELETE FROM comments WHERE id = ?").bind(id).run();
-          return Response.json({ success: true }, { headers: corsHeaders });
-        } catch (e) {
-          return new Response("删除失败: " + e.message, { status: 500, headers: corsHeaders });
+          return new Response(e.message, { status: 500, headers: corsHeaders });
         }
       }
     }
 
-    // 【6】静态资源兜底与页面托管适配
-    // 如果请求不是针对 API 的，则交还给 Cloudflare Pages 处理静态文件 (如 index.html)
+    if (url.pathname.startsWith("/api/admin")) {
+      const adminKey = request.headers.get("Admin-Key");
+      if (adminKey !== "5280") {
+        return new Response("Unauthorized", { status: 401, headers: corsHeaders });
+      }
+
+      if (url.pathname === "/api/admin/comments" && request.method === "GET") {
+        const { results } = await env.DB.prepare("SELECT * FROM comments ORDER BY id DESC").all();
+        return Response.json(results, { headers: corsHeaders });
+      }
+
+      if (url.pathname.startsWith("/api/admin/comments/") && request.method === "DELETE") {
+        const id = url.pathname.split("/").pop();
+        await env.DB.prepare("DELETE FROM comments WHERE id = ? OR parent_id = ?").bind(id, id).run();
+        return Response.json({ success: true }, { headers: corsHeaders });
+      }
+
+      if (url.pathname.startsWith("/api/admin/pin/") && request.method === "POST") {
+        const id = url.pathname.split("/").pop();
+        const { is_pinned } = await request.json();
+        await env.DB.prepare("UPDATE comments SET is_pinned = ? WHERE id = ?").bind(is_pinned, id).run();
+        return Response.json({ success: true }, { headers: corsHeaders });
+      }
+
+      if (url.pathname === "/api/admin/config" && request.method === "GET") {
+        const { results } = await env.DB.prepare("SELECT * FROM config").all();
+        return Response.json(results, { headers: corsHeaders });
+      }
+
+      if (url.pathname === "/api/admin/config" && request.method === "POST") {
+        const { dev_qqs, banned_ips } = await request.json();
+        await env.DB.prepare("UPDATE config SET value = ? WHERE key = 'dev_qqs'").bind(dev_qqs).run();
+        await env.DB.prepare("UPDATE config SET value = ? WHERE key = 'banned_ips'").bind(banned_ips).run();
+        return Response.json({ success: true }, { headers: corsHeaders });
+      }
+    }
+
     if (env.ASSETS) {
       return env.ASSETS.fetch(request);
     }
-
-    // 【7】找不到路径时的全局 404
     return new Response("Not Found", { status: 404, headers: corsHeaders });
   }
 };
