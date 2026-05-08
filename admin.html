@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>评论后台管理</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-800 p-4">
+    <div id="loginView" class="max-w-sm mx-auto mt-20 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+        <h2 class="text-xl font-bold mb-4 text-center">后台登录</h2>
+        <input type="password" id="pwd" placeholder="输入管理密码" class="w-full bg-slate-50 p-3 rounded-xl border outline-none focus:border-blue-500 mb-4">
+        <button onclick="login()" class="w-full bg-blue-600 text-white p-3 rounded-xl font-bold">进入</button>
+    </div>
+
+    <div id="adminView" class="max-w-4xl mx-auto hidden">
+        <div class="flex justify-between items-center mb-6 mt-4">
+            <h1 class="text-2xl font-bold">留言板控制台</h1>
+            <button onclick="logout()" class="text-slate-500 bg-white px-4 py-2 rounded-lg border shadow-sm">退出</button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div class="col-span-1 bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+                <h3 class="font-bold mb-3">系统全局配置</h3>
+                <label class="block text-xs text-slate-500 mb-1">开发者QQ号 (英文逗号分隔)</label>
+                <input type="text" id="devQQs" class="w-full bg-slate-50 p-2 rounded-lg border text-sm mb-3">
+                <label class="block text-xs text-slate-500 mb-1">封禁IP名单 (英文逗号分隔)</label>
+                <textarea id="banIPs" rows="3" class="w-full bg-slate-50 p-2 rounded-lg border text-sm mb-3"></textarea>
+                <button onclick="saveConfig()" class="w-full bg-slate-800 text-white p-2 rounded-lg text-sm font-bold">保存配置</button>
+            </div>
+            
+            <div class="col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[500px]">
+                <div class="p-4 border-b border-slate-100 font-bold flex justify-between">
+                    <span>数据总览</span>
+                    <button onclick="loadData()" class="text-blue-600 text-sm">刷新数据</button>
+                </div>
+                <div class="overflow-y-auto p-4 space-y-3 flex-1" id="adminList"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = "/api/admin";
+        let ADMIN_KEY = localStorage.getItem("adminKey") || "";
+
+        if (ADMIN_KEY) showAdmin();
+
+        function login() {
+            ADMIN_KEY = document.getElementById("pwd").value;
+            localStorage.setItem("adminKey", ADMIN_KEY);
+            showAdmin();
+        }
+
+        function logout() {
+            ADMIN_KEY = "";
+            localStorage.removeItem("adminKey");
+            document.getElementById("adminView").classList.add("hidden");
+            document.getElementById("loginView").classList.remove("hidden");
+        }
+
+        async function showAdmin() {
+            document.getElementById("loginView").classList.add("hidden");
+            document.getElementById("adminView").classList.remove("hidden");
+            await loadConfig();
+            await loadData();
+        }
+
+        async function api(path, method = "GET", body = null) {
+            const opt = { method, headers: { "Admin-Key": ADMIN_KEY, "Content-Type": "application/json" } };
+            if (body) opt.body = JSON.stringify(body);
+            const res = await fetch(API_BASE + path, opt);
+            if (res.status === 401) { logout(); throw new Error("密码错误"); }
+            return res.json();
+        }
+
+        async function loadConfig() {
+            try {
+                const conf = await api("/config");
+                const dev = conf.find(c => c.key === "dev_qqs");
+                const ban = conf.find(c => c.key === "banned_ips");
+                if (dev) document.getElementById("devQQs").value = dev.value;
+                if (ban) document.getElementById("banIPs").value = ban.value;
+            } catch (e) {}
+        }
+
+        async function saveConfig() {
+            await api("/config", "POST", {
+                dev_qqs: document.getElementById("devQQs").value.trim(),
+                banned_ips: document.getElementById("banIPs").value.trim()
+            });
+            alert("配置已保存");
+        }
+
+        async function loadData() {
+            try {
+                const list = await api("/comments");
+                document.getElementById("adminList").innerHTML = list.map(c => `
+                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                        <div class="flex justify-between items-start mb-2">
+                            <div>
+                                <span class="font-bold text-sm">${c.name} ${c.parent_id ? '(回复ID:'+c.parent_id+')' : ''}</span>
+                                <span class="text-xs text-blue-600 ml-2">QQ: ${c.qq || '无'}</span>
+                                <span class="text-xs text-red-500 ml-2">IP: ${c.ip}</span>
+                            </div>
+                            <div class="flex gap-2">
+                                <button onclick="togglePin(${c.id}, ${c.is_pinned === 1 ? 0 : 1})" class="text-xs px-2 py-1 bg-white border rounded shadow-sm">${c.is_pinned === 1 ? '取消置顶' : '设为置顶'}</button>
+                                <button onclick="del(${c.id})" class="text-xs px-2 py-1 bg-red-50 text-red-600 border border-red-100 rounded shadow-sm">删除</button>
+                            </div>
+                        </div>
+                        <p class="text-sm text-slate-700">${c.content}</p>
+                    </div>
+                `).join("");
+            } catch (e) {}
+        }
+
+        async function togglePin(id, status) {
+            await api(`/pin/${id}`, "POST", { is_pinned: status });
+            loadData();
+        }
+
+        async function del(id) {
+            if (!confirm("删除将同时删除其所有子回复，确认？")) return;
+            await api(`/comments/${id}`, "DELETE");
+            loadData();
+        }
+    </script>
+</body>
+</html>
