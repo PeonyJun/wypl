@@ -119,7 +119,7 @@
         }
 
         async function del(id) {
-            if (!confirm("删除将同时删除其所有子回复，确认？")) return;
+            if (!confirm("确认删除？")) return;
             await api(`/comments/${id}`, "DELETE");
             loadData();
         }
